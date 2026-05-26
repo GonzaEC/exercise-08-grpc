@@ -10,7 +10,6 @@ Endpoints:
 
 import logging
 import os
-import time
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -34,29 +33,45 @@ GRPC_TARGET = f"{GRPC_HOST}:{GRPC_PORT}"
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# gRPC channel / stub — created eagerly but connected lazily by gRPC itself.
+# The insecure_channel() call is non-blocking; gRPC dials on the first RPC.
+# This means the gateway starts instantly regardless of whether the gRPC
+# server is already up — no blocking wait in the startup path.
+# ---------------------------------------------------------------------------
+
+_channel: grpc.Channel | None = None
+_stub: node_registry_pb2_grpc.NodeRegistryStub | None = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _channel, _stub
+    # Non-blocking: gRPC will establish the TCP connection on the first call.
+    _channel = grpc.insecure_channel(GRPC_TARGET)
+    _stub = node_registry_pb2_grpc.NodeRegistryStub(_channel)
+    logger.info("gRPC channel created → %s (will connect on first RPC)", GRPC_TARGET)
+    yield
+    if _channel is not None:
+        _channel.close()
+
+
+app = FastAPI(title="Node Registry Gateway", lifespan=lifespan)
+
+
+# ---------------------------------------------------------------------------
+# Pydantic models
 # ---------------------------------------------------------------------------
 
 
-def _wait_for_grpc(max_retries: int = 30, delay: float = 2.0) -> None:
-    """Block until the gRPC server is reachable."""
-    for attempt in range(1, max_retries + 1):
-        channel = grpc.insecure_channel(GRPC_TARGET)
-        try:
-            grpc.channel_ready_future(channel).result(timeout=5)
-            channel.close()
-            logger.info("gRPC server at %s is ready.", GRPC_TARGET)
-            return
-        except grpc.FutureTimeoutError:
-            channel.close()
-            logger.warning(
-                "gRPC server not ready (%d/%d), retrying in %.0fs…",
-                attempt,
-                max_retries,
-                delay,
-            )
-            time.sleep(delay)
-    raise RuntimeError(f"Could not connect to gRPC server at {GRPC_TARGET}")
+class RegisterNodeRequest(BaseModel):
+    name: str
+    address: str
+    port: int
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
 def _node_to_dict(node: node_registry_pb2.Node) -> dict[str, Any]:
@@ -67,33 +82,6 @@ def _node_to_dict(node: node_registry_pb2.Node) -> dict[str, Any]:
         "port": node.port,
         "status": node.status,
     }
-
-
-# ---------------------------------------------------------------------------
-# FastAPI app
-# ---------------------------------------------------------------------------
-
-_channel: grpc.Channel | None = None
-_stub: node_registry_pb2_grpc.NodeRegistryStub | None = None
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global _channel, _stub
-    _wait_for_grpc()
-    _channel = grpc.insecure_channel(GRPC_TARGET)
-    _stub = node_registry_pb2_grpc.NodeRegistryStub(_channel)
-    yield
-    _channel.close()
-
-
-app = FastAPI(title="Node Registry Gateway", lifespan=lifespan)
-
-
-class RegisterNodeRequest(BaseModel):
-    name: str
-    address: str
-    port: int
 
 
 # ---------------------------------------------------------------------------

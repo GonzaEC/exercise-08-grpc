@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
 
   db:
@@ -27,6 +25,13 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import grpc; ch=grpc.insecure_channel('localhost:50051'); grpc.channel_ready_future(ch).result(timeout=5); ch.close()"]
+      interval: 5s
+      timeout: 10s
+      retries: 12
+      start_period: 10s
     restart: on-failure
 
   gateway:
@@ -39,7 +44,8 @@ services:
       GRPC_HOST: grpc-server
       GRPC_PORT: "50051"
     depends_on:
-      - grpc-server
+      grpc-server:
+        condition: service_healthy
     restart: on-failure
 
 volumes:
